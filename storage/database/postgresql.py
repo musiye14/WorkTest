@@ -58,10 +58,55 @@ class PostgreSQLDatabase(DatabaseBase):
                 )
             """)
 
+            # 语义记忆表
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS semantic_memory (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    user_id UUID NOT NULL,
+                    topic VARCHAR(200) NOT NULL,
+                    category VARCHAR(100),
+                    proficiency INTEGER DEFAULT 0,
+                    practice_count INTEGER DEFAULT 0,
+                    correct_count INTEGER DEFAULT 0,
+                    last_practice TIMESTAMP,
+                    first_learned TIMESTAMP DEFAULT NOW(),
+                    weak_points TEXT[],
+                    strong_points TEXT[],
+                    status VARCHAR(20),
+                    metadata JSONB,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(user_id, topic)
+                )
+            """)
+
+            # 情节记忆表
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS episodic_memory (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    abstract_question TEXT NOT NULL,
+                    original_question TEXT NOT NULL,
+                    topic VARCHAR(200),
+                    user_context JSONB,
+                    user_answer TEXT,
+                    evaluation JSONB,
+                    source VARCHAR(50),
+                    company VARCHAR(100),
+                    difficulty VARCHAR(20),
+                    quality_score DECIMAL(3,1),
+                    metadata JSONB,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+
             # 创建索引
             await conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_documents_user_id
-                ON documents(user_id)
+                CREATE INDEX IF NOT EXISTS idx_documents_user_id ON documents(user_id);
+                CREATE INDEX IF NOT EXISTS idx_semantic_memory_user_id ON semantic_memory(user_id);
+                CREATE INDEX IF NOT EXISTS idx_semantic_memory_topic ON semantic_memory(topic);
+                CREATE INDEX IF NOT EXISTS idx_episodic_memory_topic ON episodic_memory(topic);
+                CREATE INDEX IF NOT EXISTS idx_episodic_memory_quality_score ON episodic_memory(quality_score);
             """)
 
             print("✓ 数据库表已创建")
@@ -135,3 +180,19 @@ class PostgreSQLDatabase(DatabaseBase):
             result = await conn.execute(query, doc_id, *updates.values())
 
         return result == "UPDATE 1"
+
+    async def get_semantic_memory_by_ids(self, memory_ids: List[str]) -> List[Dict[str, Any]]:
+        """批量获取语义记忆"""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM semantic_memory WHERE id = ANY($1::uuid[])", memory_ids
+            )
+        return [dict(row) for row in rows]
+
+    async def get_episodic_memory_by_ids(self, memory_ids: List[str]) -> List[Dict[str, Any]]:
+        """批量获取情节记忆"""
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM episodic_memory WHERE id = ANY($1::uuid[])", memory_ids
+            )
+        return [dict(row) for row in rows]
