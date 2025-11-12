@@ -23,6 +23,9 @@ class InterviewState(TypedDict):
     # 追问轮次 比如设计成一个主问题，不能超过3个追问
     deep_index:int
 
+    # 主问题索引，用于追踪当前是第几个主问题
+    main_question_index:int
+
     # 追问问题列表 追问的问题会重写这个列表
     deep_questions:List[Dict]
 

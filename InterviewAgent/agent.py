@@ -10,6 +10,8 @@ from typing import Dict, Any, Optional
 from .llms.base import BaseLLM
 from .graph.graph import buildGraph
 from .graph.state import InterviewState
+from langchain_core.runnables import RunnableConfig
+import uuid
 
 from config import get_config
 
@@ -120,6 +122,7 @@ class InterviewAgent:
             "resume_info": interview_info["resume_info"],
             "mode": interview_info["mode"],
             "difficulty": interview_info["difficulty"],
+            "main_question_index":0,
             "question_plan": [],
             "current_question": {},
             "messages": [],
@@ -155,17 +158,13 @@ class InterviewAgent:
             # 配置递归限制，避免无限循环
             config = {"recursion_limit": 500}
 
-            for event in self.graph.stream(initial_state, config=config):
-                # event 是 {node_name: output} 的字典
-                for node_name, output in event.items():
-                    print(f"[调试] 节点 {node_name} 执行完成")
+            # 使用 stream 的 mode="values" 来获取完整的 state
+            final_state = None
+            for state_snapshot in self.graph.stream(initial_state, config=config, stream_mode="values"):
+                # state_snapshot 是完整的 state
+                final_state = state_snapshot
 
-                    # 如果到达结束节点
-                    if output and output.get("next_step") == "end":
-                        print("\n" + "=" * 50)
-                        print("面试结束，感谢参与！")
-                        print("=" * 50)
-                        return
+            return final_state
 
         except Exception as e:
             print(f"面试过程中发生错误：{e}")

@@ -1,4 +1,4 @@
-from langgraph.graph import StateGraph, END
+from langgraph.graph import StateGraph
 from .state import InterviewState
 from .nodes import InterviewNodes
 from ..llms.base import BaseLLM
@@ -34,6 +34,7 @@ def buildGraph(llm: BaseLLM, think_max_num: int = 3, deep_question_max_num: int 
     builder.add_node("deepQuestionJudge", nodes.judge)
     builder.add_node("deepQuestionOutput", nodes.deep_question_output)
     builder.add_node("userInput", nodes.user_input)
+    builder.add_node("end", nodes.end)
 
     # ========== 主流程边 ==========
     builder.add_edge("messageInput", "questionBuild")

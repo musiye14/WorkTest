@@ -54,7 +54,7 @@ class InterviewNodes:
                 difficulty=state["difficulty"]
             )
 
-        result = self.llm.invoke_with_schema(prompt, output_schema_question_plan_generation)
+        result = self.llm.invoke_with_schema(prompt, output_schema_question_plan_generation, node_name="questionBuild")
         return {"question_plan": result["question_plan"]}
 
     def think(self, state: InterviewState) -> Dict[str, Any]:
@@ -98,7 +98,7 @@ class InterviewNodes:
         else:
             raise ValueError(f"未知的 interview_stage: {stage}")
 
-        result = self.llm.invoke_with_schema(prompt, output_schema_deep_thinking)
+        result = self.llm.invoke_with_schema(prompt, output_schema_deep_thinking, node_name=f"{stage}Think")
         return {
             "thinking_result": result,
             "thinking_process": state["thinking_process"] + [result]
@@ -146,7 +146,7 @@ class InterviewNodes:
         else:
             raise ValueError(f"未知的 interview_stage: {stage}")
 
-        result = self.llm.invoke_with_schema(prompt, output_schema_reflection)
+        result = self.llm.invoke_with_schema(prompt, output_schema_reflection, node_name=f"{stage}Judge")
 
         # 检查是否超过最大轮次限制
         if round_num >= self.think_max_num:
@@ -167,17 +167,30 @@ class InterviewNodes:
     def question_output(self, state: InterviewState) -> Dict[str, Any]:
         """提问输出节点 - 从问题列表中取出当前问题并输出"""
         question_plan = state.get("question_plan", [])
-        # 统计已提问的数量（AIMessage 的数量）
-        current_question_index = len([msg for msg in state.get("messages", []) if isinstance(msg, AIMessage)])
+        main_question_index = state.get("main_question_index",0)
+
+        # 第一次输出时，打印完整的问题列表
+        if main_question_index == 0 and question_plan:
+            print("\n" + "=" * 50)
+            print(f"📋 最终生成的问题列表（共 {len(question_plan)} 个问题）")
+            print("=" * 50)
+            for idx, q in enumerate(question_plan, 1):
+                print(f"{idx}. [{q.get('difficulty', '未知')}] {q.get('topic', '未知主题')}")
+                print(f"   问题: {q.get('question', '')}")
+                print(f"   理由: {q.get('reasoning', '')}")
+                print()
+            print("=" * 50 + "\n")
 
         # 如果还有问题未提问
-        if current_question_index < len(question_plan):
-            current_question = question_plan[current_question_index]
+        if main_question_index < len(question_plan):
+            current_question = question_plan[main_question_index]
+            main_question_index+=1
 
             print(f"面试官：{current_question.get('question', '')}")
 
             return {
                 "current_question": current_question,
+                "main_question_index": main_question_index,
                 "messages": [AIMessage(content=current_question["question"])]
             }
         else:
@@ -227,7 +240,7 @@ class InterviewNodes:
             follow_up_count=deep_index
         )
 
-        decision = self.llm.invoke_with_schema(prompt, output_schema_follow_up_decision)
+        decision = self.llm.invoke_with_schema(prompt, output_schema_follow_up_decision, node_name="nextStep")
 
         # 根据决策结果设置下一步
         if decision.get("should_follow_up", False)==True and deep_index < self.deep_question_max_num:
@@ -237,12 +250,24 @@ class InterviewNodes:
                 "interview_stage": "deepQuestion",
             }
         else:
-            # 不需要追问，进入下一个问题
-            # 重置追问计数
-            return {
-                "next_step": "question",
-                "deep_index": 0
-            }
+            # 不需要追问，检查是否还有剩余的主问题
+            question_plan = state.get("question_plan", [])
+            main_question_index = state.get("main_question_index", 0)
+
+            # 检查是否所有主问题都已问完
+            if main_question_index >= len(question_plan):
+                # 所有问题已问完，结束面试
+                return {
+                    "next_step": "end",
+                    "deep_index": 0
+                }
+            else:
+                # 还有问题，进入下一个问题
+                # 重置追问计数
+                return {
+                    "next_step": "question",
+                    "deep_index": 0
+                }
 
     def adjust_question(self, state: InterviewState) -> Dict[str, Any]:
         """调整问题节点"""
@@ -273,7 +298,7 @@ class InterviewNodes:
                 difficulty=state["difficulty"]
             )
 
-        result = self.llm.invoke_with_schema(prompt, output_schema_question_adjustment)
+        result = self.llm.invoke_with_schema(prompt, output_schema_question_adjustment, node_name="adjustQuestion")
         return {
             "question_plan": result["adjusted_question_plan"],
             "original_question_plan": state["question_plan"]
@@ -313,11 +338,12 @@ class InterviewNodes:
                 difficulty=state["difficulty"]
             )
 
-        result = self.llm.invoke_with_schema(prompt, output_schema_deep_question_generation)
+        result = self.llm.invoke_with_schema(prompt, output_schema_deep_question_generation, node_name="deepQuestion")
         return {
             "current_question": result,
             "deep_index": state["deep_index"] + 1
         }
+    
 
     def judge_res(self, state: InterviewState) -> str:
         """反思判断结果路由"""
@@ -351,3 +377,27 @@ class InterviewNodes:
             return "end"
         else:
             return "questionOutput"
+
+    def end(self, state: InterviewState) -> Dict[str, Any]:
+        """结束节点 - 收集最终状态并返回"""
+
+        print("\n" + "=" * 50)
+        print("面试结束，感谢参与！")
+        print("=" * 50)
+
+        print("\n" + "=" * 50)
+        print("📊 面试统计")
+        print("=" * 50)
+
+        messages = state.get("messages", [])
+        question_plan = state.get("question_plan", [])
+
+        print(f"总问题数: {len(question_plan)}")
+        print(f"对话轮次: {len(messages)}")
+        print("=" * 50)
+
+        
+
+        # 返回完整的 state，不做任何修改
+        # 这样 state 会被传递到最终输出
+        return {}

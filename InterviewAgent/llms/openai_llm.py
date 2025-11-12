@@ -7,6 +7,7 @@ import json
 from typing import Dict, Any, Optional
 from openai import OpenAI, AsyncOpenAI
 from .base import BaseLLM
+from jsonschema import validate, ValidationError
 
 
 class OpenAILLM(BaseLLM):
@@ -44,41 +45,46 @@ class OpenAILLM(BaseLLM):
         )
         return response.choices[0].message.content
 
-    async def ainvoke(self, prompt: str, **kwargs) -> str:
-        """调用 LLM（异步）"""
-        response = await self.async_client.chat.completions.create(
-            model=self.model_name,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=kwargs.get("temperature", self.temperature),
-            **{k: v for k, v in kwargs.items() if k != "temperature"}
-        )
-        return response.choices[0].message.content
-
-    def invoke_with_schema(self, prompt: str, output_schema: Dict[str, Any], **kwargs) -> Dict[str, Any]:
+    def _invoke_with_schema(self, prompt: str, output_schema: Dict[str, Any], **kwargs) -> tuple[Dict[str, Any], Dict]:
         """调用 LLM 并返回结构化输出（同步）"""
-        response = self.client.chat.completions.create(
-            model=self.model_name,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=kwargs.get("temperature", self.temperature),
-            response_format={"type": "json_object"},
-            **{k: v for k, v in kwargs.items() if k not in ["temperature", "output_schema"]}
-        )
+        max_retries = 3
+        last_result = None
+        total_usage = {"prompt_tokens": 0, "completion_tokens": 0}
 
-        content = response.choices[0].message.content
-        return json.loads(content)
+        for attempt in range(max_retries):
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=kwargs.get("temperature", self.temperature),
+                response_format={"type": "json_object"},
+                **{k: v for k, v in kwargs.items() if k not in ["temperature", "output_schema"]}
+            )
 
-    async def ainvoke_with_schema(self, prompt: str, output_schema: Dict[str, Any], **kwargs) -> Dict[str, Any]:
-        """调用 LLM 并返回结构化输出（异步）"""
-        response = await self.async_client.chat.completions.create(
-            model=self.model_name,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=kwargs.get("temperature", self.temperature),
-            response_format={"type": "json_object"},
-            **{k: v for k, v in kwargs.items() if k not in ["temperature", "output_schema"]}
-        )
+            content = response.choices[0].message.content
+            result = json.loads(content)
+            last_result = result
 
-        content = response.choices[0].message.content
-        return json.loads(content)
+            # 累计 token 使用量
+            if hasattr(response, 'usage') and response.usage:
+                total_usage["prompt_tokens"] += response.usage.prompt_tokens
+                total_usage["completion_tokens"] += response.usage.completion_tokens
+
+            # 验证输出是否符合 schema
+            try:
+                validate(instance=result, schema=output_schema)
+                # 验证成功，返回结果
+                return result, total_usage
+            except ValidationError as e:
+                print(f"[警告] 第 {attempt + 1}/{max_retries} 次尝试，LLM 输出不符合 schema: {e.message}")
+                if attempt < max_retries - 1:
+                    print(f"[重试] 正在进行第 {attempt + 2} 次尝试...")
+                else:
+                    # 最后一次尝试仍然失败
+                    print(f"[错误] 已达到最大重试次数 ({max_retries})，返回最后一次结果（可能不符合 schema）")
+                    return last_result, total_usage
+
+        # 理论上不会到这里，但为了安全返回最后的结果
+        return last_result, total_usage
 
     @classmethod
     def get_default_model(cls) -> str:
