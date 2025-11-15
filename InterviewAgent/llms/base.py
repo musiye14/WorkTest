@@ -6,6 +6,7 @@ LLM 基类
 from abc import ABC, abstractmethod
 from typing import Optional, Dict, Any
 import time
+from ..utils.logger import logger
 
 
 class BaseLLM(ABC):
@@ -57,14 +58,33 @@ class BaseLLM(ABC):
     def invoke_with_schema(self, prompt:str,
     output_schema:Dict[str,Any],**kwargs) ->Dict[str, Any]:
         node_name = kwargs.pop("node_name", "unknown")
+        agent_name = kwargs.pop("agent_name", "InterviewAgent")
+
         start_time = time.time()
         result, usage = self._invoke_with_schema(prompt, output_schema, **kwargs)
         duration = time.time() - start_time
+
+        # 使用 Loguru 记录日志
+        node_logger = logger.bind(agent=agent_name, node=node_name)
+
+        input_tokens = usage.get('prompt_tokens', 0)
+        output_tokens = usage.get('completion_tokens', 0)
+        total_tokens = input_tokens + output_tokens
+
+        # 同时保留控制台输出（用户友好）
         print(f"[埋点] 节点: {node_name} | "
-              f"输入toekn: {usage.get('prompt_tokens', 0)} | "
-              f"输出token: {usage.get('completion_tokens', 0)} | "
-              f"Total Tokens: {usage.get('prompt_tokens', 0) + usage.get('completion_tokens', 0)} | "
+              f"输入token: {input_tokens} | "
+              f"输出token: {output_tokens} | "
+              f"Total Tokens: {total_tokens} | "
               f"耗时: {duration:.2f}s")
+
+        # 记录到日志文件
+        node_logger.info(
+            f"LLM调用完成 | 输入token: {input_tokens} | "
+            f"输出token: {output_tokens} | 总计: {total_tokens} | "
+            f"耗时: {duration:.2f}s"
+        )
+
         return result
 
 

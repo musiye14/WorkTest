@@ -1,14 +1,16 @@
 from .state import InterviewState
 from ..prompt.prompt import *
 from ..llms.base import BaseLLM
+from ..utils.logger import log_node_content, log_token_usage, logger
 from typing import Dict, Any
 from langchain_core.messages import HumanMessage,AIMessage
+import time
 
 
 class InterviewNodes:
     """面试节点类，封装所有节点逻辑"""
 
-    def __init__(self, llm: BaseLLM, think_max_num: int = 3, deep_question_max_num: int = 3):
+    def __init__(self, llm: BaseLLM, think_max_num: int = 3, deep_question_max_num: int = 3, agent_name: str = "InterviewAgent"):
         """
         初始化面试节点
 
@@ -16,10 +18,12 @@ class InterviewNodes:
             llm: LLM 实例
             think_max_num: 思考最大轮次，默认 3
             deep_question_max_num: 追问最大次数，默认 3
+            agent_name: Agent 名称，用于日志记录
         """
         self.llm = llm
         self.think_max_num = think_max_num
         self.deep_question_max_num = deep_question_max_num
+        self.agent_name = agent_name
 
     def message_input(self, state: InterviewState) -> Dict[str, Any]:
         """输入处理节点"""
@@ -166,6 +170,8 @@ class InterviewNodes:
 
     def question_output(self, state: InterviewState) -> Dict[str, Any]:
         """提问输出节点 - 从问题列表中取出当前问题并输出"""
+        node_logger = logger.bind(agent=self.agent_name, node="questionOutput")
+
         question_plan = state.get("question_plan", [])
         main_question_index = state.get("main_question_index",0)
 
@@ -174,6 +180,7 @@ class InterviewNodes:
             print("\n" + "=" * 50)
             print(f"📋 最终生成的问题列表（共 {len(question_plan)} 个问题）")
             print("=" * 50)
+            node_logger.info(f"生成问题列表，共 {len(question_plan)} 个问题")
             for idx, q in enumerate(question_plan, 1):
                 print(f"{idx}. [{q.get('difficulty', '未知')}] {q.get('topic', '未知主题')}")
                 print(f"   问题: {q.get('question', '')}")
@@ -186,7 +193,11 @@ class InterviewNodes:
             current_question = question_plan[main_question_index]
             main_question_index+=1
 
-            print(f"面试官：{current_question.get('question', '')}")
+            question_text = current_question.get('question', '')
+            print(f"面试官：{question_text}")
+
+            # 记录问题输出
+            node_logger.info(f"输出第 {main_question_index} 个问题: {question_text}")
 
             return {
                 "current_question": current_question,
@@ -195,22 +206,35 @@ class InterviewNodes:
             }
         else:
             # 所有问题已问完
+            node_logger.info("所有问题已问完，准备结束面试")
             return {"next_step": "end"}
 
     def deep_question_output(self, state: InterviewState) -> Dict[str, Any]:
         """追问输出节点 - 输出追问问题给用户"""
+        node_logger = logger.bind(agent=self.agent_name, node="deepQuestionOutput")
+
         current_question = state.get("current_question", {})
         follow_up_question = current_question.get("question", "")
-        
+
         print(f"面试官：{follow_up_question}")
-        
+
+        # 记录追问输出
+        deep_index = state.get("deep_index", 0)
+        node_logger.info(f"输出追问 (第 {deep_index} 次): {follow_up_question}")
+
         return {
             "messages": [AIMessage(content=follow_up_question)]
         }
 
     def user_input(self, state: InterviewState) -> Dict[str, Any]:
         """等待用户输入节点"""
+        node_logger = logger.bind(agent=self.agent_name, node="userInput")
+
         user_answer = input("你的回答：").strip()
+
+        # 记录用户输入
+        node_logger.info(f"用户回答: {user_answer}")
+
         return {
             "messages": [HumanMessage(content=user_answer)]
         }
@@ -380,6 +404,7 @@ class InterviewNodes:
 
     def end(self, state: InterviewState) -> Dict[str, Any]:
         """结束节点 - 收集最终状态并返回"""
+        node_logger = logger.bind(agent=self.agent_name, node="end")
 
         print("\n" + "=" * 50)
         print("面试结束，感谢参与！")
@@ -396,7 +421,8 @@ class InterviewNodes:
         print(f"对话轮次: {len(messages)}")
         print("=" * 50)
 
-        
+        # 记录面试结束统计
+        node_logger.info(f"面试结束 | 总问题数: {len(question_plan)} | 对话轮次: {len(messages)}")
 
         # 返回完整的 state，不做任何修改
         # 这样 state 会被传递到最终输出
