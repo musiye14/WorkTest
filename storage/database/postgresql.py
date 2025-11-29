@@ -1,8 +1,9 @@
 """
-PostgreSQL 实现 - 主数据源
+PostgreSQL 实现 - 主数据源 用户对应的简历、JD、面试表现数据
 """
 from typing import List, Optional, Dict, Any
 import asyncpg
+import json
 from .base import DatabaseBase
 from config import get_config
 import uuid
@@ -32,7 +33,7 @@ class PostgreSQLDatabase(DatabaseBase):
             min_size=5,
             max_size=20
         )
-        print(f"✓ 成功连接到 PostgreSQL")
+        print(f"[OK] 成功连接到 PostgreSQL")
 
         # 创建表
         await self._create_tables()
@@ -45,7 +46,7 @@ class PostgreSQLDatabase(DatabaseBase):
     async def _create_tables(self) -> None:
         """创建表"""
         async with self.pool.acquire() as conn:
-            # 文档表
+            # 文档表 存储文档（简历、JD等）
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS documents (
                     id UUID PRIMARY KEY,
@@ -58,7 +59,7 @@ class PostgreSQLDatabase(DatabaseBase):
                 )
             """)
 
-            # 语义记忆表
+            # 语义记忆表 长期记忆 用户知识点掌握情况
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS semantic_memory (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -80,7 +81,7 @@ class PostgreSQLDatabase(DatabaseBase):
                 )
             """)
 
-            # 情节记忆表
+            # 情节记忆表 存储面经/案例库 用于fewshot
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS episodic_memory (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -109,7 +110,7 @@ class PostgreSQLDatabase(DatabaseBase):
                 CREATE INDEX IF NOT EXISTS idx_episodic_memory_quality_score ON episodic_memory(quality_score);
             """)
 
-            print("✓ 数据库表已创建")
+            print("[OK] 数据库表已创建")
 
     async def insert_document(self, document: Dict[str, Any]) -> str:
         """插入文档"""
@@ -120,7 +121,8 @@ class PostgreSQLDatabase(DatabaseBase):
                 INSERT INTO documents (id, user_id, content, doc_type, metadata)
                 VALUES ($1, $2, $3, $4, $5)
             """, doc_id, document.get('user_id'), document['content'],
-                document.get('doc_type'), document.get('metadata'))
+                document.get('doc_type'),
+                json.dumps(document.get('metadata')) if document.get('metadata') else None)
 
         return doc_id
 
@@ -136,10 +138,11 @@ class PostgreSQLDatabase(DatabaseBase):
                         INSERT INTO documents (id, user_id, content, doc_type, metadata)
                         VALUES ($1, $2, $3, $4, $5)
                     """, doc_id, doc.get('user_id'), doc['content'],
-                        doc.get('doc_type'), doc.get('metadata'))
+                        doc.get('doc_type'),
+                        json.dumps(doc.get('metadata')) if doc.get('metadata') else None)
                     doc_ids.append(doc_id)
 
-        print(f"✓ 插入 {len(doc_ids)} 条文档到 PostgreSQL")
+        print(f"[OK] 插入 {len(doc_ids)} 条文档到 PostgreSQL")
         return doc_ids
 
     async def get_document_by_id(self, doc_id: str) -> Optional[Dict[str, Any]]:
@@ -196,3 +199,122 @@ class PostgreSQLDatabase(DatabaseBase):
                 "SELECT * FROM episodic_memory WHERE id = ANY($1::uuid[])", memory_ids
             )
         return [dict(row) for row in rows]
+
+    async def insert_episodic_memory(self, memory: Dict[str, Any]) -> str:
+        """
+        插入单条情节记忆（面经记录）
+
+        参数:
+            memory: 面经记录，必须包含以下字段：
+                - abstract_question: 抽象问题
+                - original_question: 原始问题
+                其他字段可选
+
+        返回:
+            memory_id: 插入记录的 UUID
+        """
+        memory_id = memory.get('id') or str(uuid.uuid4())
+
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO episodic_memory (
+                    id, abstract_question, original_question, topic,
+                    user_context, user_answer, evaluation, source,
+                    company, difficulty, quality_score, metadata
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            """,
+                memory_id,
+                memory['abstract_question'],
+                memory['original_question'],
+                memory.get('topic'),
+                json.dumps(memory.get('user_context')) if memory.get('user_context') else None,
+                memory.get('user_answer'),
+                json.dumps(memory.get('evaluation')) if memory.get('evaluation') else None,
+                memory.get('source'),
+                memory.get('company'),
+                memory.get('difficulty'),
+                memory.get('quality_score'),
+                json.dumps(memory.get('metadata')) if memory.get('metadata') else None
+            )
+
+        return memory_id
+
+    async def insert_episodic_memories(self, memories: List[Dict[str, Any]]) -> List[str]:
+        """
+        批量插入情节记忆（面经记录）
+
+        参数:
+            memories: 面经记录列表
+
+        返回:
+            memory_ids: 插入记录的 UUID 列表
+        """
+        if not memories:
+            return []
+
+        memory_ids = []
+
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                for memory in memories:
+                    memory_id = memory.get('id') or str(uuid.uuid4())
+                    await conn.execute("""
+                        INSERT INTO episodic_memory (
+                            id, abstract_question, original_question, topic,
+                            user_context, user_answer, evaluation, source,
+                            company, difficulty, quality_score, metadata
+                        )
+                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                    """,
+                        memory_id,
+                        memory['abstract_question'],
+                        memory['original_question'],
+                        memory.get('topic'),
+                        json.dumps(memory.get('user_context')) if memory.get('user_context') else None,
+                        memory.get('user_answer'),
+                        json.dumps(memory.get('evaluation')) if memory.get('evaluation') else None,
+                        memory.get('source'),
+                        memory.get('company'),
+                        memory.get('difficulty'),
+                        memory.get('quality_score'),
+                        json.dumps(memory.get('metadata')) if memory.get('metadata') else None
+                    )
+                    memory_ids.append(memory_id)
+
+        print(f"[OK] 插入 {len(memory_ids)} 条面经记录到 episodic_memory 表")
+        return memory_ids
+
+    async def query_user_documents(
+        self,
+        user_id: str,
+        doc_type: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        查询用户的文档列表
+
+        参数:
+            user_id: 用户 ID
+            doc_type: 文档类型（如 'resume'），None 表示查询所有类型
+
+        返回:
+            documents: 文档列表
+        """
+        async with self.pool.acquire() as conn:
+            if doc_type:
+                rows = await conn.fetch(
+                    "SELECT * FROM documents WHERE user_id = $1 AND doc_type = $2 ORDER BY created_at DESC",
+                    user_id, doc_type
+                )
+            else:
+                rows = await conn.fetch(
+                    "SELECT * FROM documents WHERE user_id = $1 ORDER BY created_at DESC",
+                    user_id
+                )
+
+        return [dict(row) for row in rows]
+
+
+# 别名，保持向后兼容
+PostgreSQLDB = PostgreSQLDatabase
+
