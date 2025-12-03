@@ -1,5 +1,5 @@
 """
-Milvus向量数据库实现
+Milvus向量数据库实现  存储长期记忆数据
 """
 from typing import List, Optional
 from pymilvus import (
@@ -56,7 +56,7 @@ class MilvusStore(VectorStoreBase):
                 host=self.host,
                 port=self.port
             )
-            print(f"✓ 成功连接到Milvus: {self.host}:{self.port}")
+            print(f"[OK] 成功连接到Milvus: {self.host}:{self.port}")
         except Exception as e:
             raise ConnectionError(f"无法连接到Milvus: {e}")
 
@@ -73,17 +73,24 @@ class MilvusStore(VectorStoreBase):
         if utility.has_collection(self.collection_name):
             if drop_if_exists:
                 utility.drop_collection(self.collection_name)
-                print(f"✓ 删除已存在的集合: {self.collection_name}")
+                print(f"[OK] 删除已存在的集合: {self.collection_name}")
             else:
                 self.collection = Collection(self.collection_name)
-                print(f"✓ 加载已存在的集合: {self.collection_name}")
+                print(f"[OK] 加载已存在的集合: {self.collection_name}")
                 return
 
-        # 定义Schema（移除 content 字段）
+        # 定义Schema（将常用过滤字段拆分为独立列）
         fields = [
             FieldSchema(name="id", dtype=DataType.VARCHAR, is_primary=True, max_length=36),
             FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=self.embedding_dim),
-            FieldSchema(name="metadata", dtype=DataType.JSON)  # 只存少量元数据
+            # 独立的过滤字段（支持高效过滤查询）
+            FieldSchema(name="user_id", dtype=DataType.VARCHAR, max_length=36, default_value=""),  # 用户ID，空字符串表示系统通用知识库
+            FieldSchema(name="topic", dtype=DataType.VARCHAR, max_length=100, default_value=""),
+            FieldSchema(name="difficulty", dtype=DataType.VARCHAR, max_length=20, default_value=""),
+            FieldSchema(name="quality_score", dtype=DataType.DOUBLE),  # 移除default_value，插入时必须提供
+            FieldSchema(name="source", dtype=DataType.VARCHAR, max_length=50, default_value=""),
+            # 其他元数据存JSON（不用于过滤）
+            FieldSchema(name="metadata", dtype=DataType.JSON)
         ]
 
         schema = CollectionSchema(
@@ -110,7 +117,7 @@ class MilvusStore(VectorStoreBase):
             index_params=index_params
         )
 
-        print(f"✓ 创建集合: {self.collection_name} (维度: {self.embedding_dim})")
+        print(f"[OK] 创建集合: {self.collection_name} (维度: {self.embedding_dim})")
 
     def insert(self, documents: List[Document]) -> List[str]:
         """插入向量索引到Milvus（不存原文）"""
@@ -120,29 +127,41 @@ class MilvusStore(VectorStoreBase):
         if not documents:
             return []
 
-        # 准备数据（只存 id + embedding + 少量 metadata）
+        # 准备数据（拆分过滤字段为独立列）
         ids = []
         embeddings = []
+        user_ids = []
+        topics = []
+        difficulties = []
+        quality_scores = []
+        sources = []
         metadatas = []
 
         for doc in documents:
             if not doc.embedding:
                 raise ValueError(f"文档 {doc.id} 缺少embedding")
 
+            metadata = doc.metadata or {}
+
             ids.append(doc.id or str(uuid.uuid4()))
             embeddings.append(doc.embedding)
 
-            # 只存少量元数据（用于过滤）
-            metadata = doc.metadata or {}
-            # 移除大字段，只保留过滤字段
-            filter_metadata = {
-                k: v for k, v in metadata.items()
-                if k in ['user_id', 'doc_type', 'category', 'type', 'original_doc_id']
-            }
-            metadatas.append(filter_metadata)
+            # 提取过滤字段为独立列
+            user_ids.append(metadata.get('user_id', ''))  # 空字符串表示系统通用知识库
+            topics.append(metadata.get('topic', ''))
+            difficulties.append(metadata.get('difficulty', ''))
+            quality_scores.append(float(metadata.get('quality_score', 0.0)))
+            sources.append(metadata.get('source', ''))
 
-        # 插入数据（移除 content）
-        data = [ids, embeddings, metadatas]
+            # 其他元数据存JSON（不包含已提取的字段）
+            other_metadata = {
+                k: v for k, v in metadata.items()
+                if k not in ['user_id', 'topic', 'difficulty', 'quality_score', 'source']
+            }
+            metadatas.append(other_metadata)
+
+        # 插入数据（按schema顺序：id, embedding, user_id, topic, difficulty, quality_score, source, metadata）
+        data = [ids, embeddings, user_ids, topics, difficulties, quality_scores, sources, metadatas]
         self.collection.insert(data)
         self.collection.flush()
 
@@ -168,24 +187,37 @@ class MilvusStore(VectorStoreBase):
             "params": {"nprobe": 10}
         }
 
-        # 执行搜索（只输出 id 和 metadata）
+        # 执行搜索（输出 id 和所有过滤字段）
         results = self.collection.search(
             data=[query_embedding],
             anns_field="embedding",
             param=search_params,
             limit=top_k,
             expr=filter_expr,
-            output_fields=["id", "metadata"]  # 移除 content
+            output_fields=["id", "user_id", "topic", "difficulty", "quality_score", "source", "metadata"]
         )
 
         # 解析结果（只包含 doc_id，不包含原文）
         search_results = []
         for hits in results:
             for hit in hits:
+                # 重新组装metadata（合并独立字段和JSON字段）
+                combined_metadata = {
+                    'user_id': hit.entity.get("user_id", ""),
+                    'topic': hit.entity.get("topic", ""),
+                    'difficulty': hit.entity.get("difficulty", ""),
+                    'quality_score': hit.entity.get("quality_score", 0.0),
+                    'source': hit.entity.get("source", "")
+                }
+                # 合并JSON中的其他元数据
+                json_metadata = hit.entity.get("metadata", {})
+                if json_metadata:
+                    combined_metadata.update(json_metadata)
+
                 doc = Document(
                     id=hit.entity.get("id"),
                     content="",  # 不存原文，需要从 PostgreSQL 查询
-                    metadata=hit.entity.get("metadata")
+                    metadata=combined_metadata
                 )
                 search_results.append(SearchResult(
                     document=doc,
@@ -242,7 +274,7 @@ class MilvusStore(VectorStoreBase):
         """删除集合"""
         if utility.has_collection(self.collection_name):
             utility.drop_collection(self.collection_name)
-            print(f"✓ 删除集合: {self.collection_name}")
+            print(f"[OK] 删除集合: {self.collection_name}")
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """断开连接"""

@@ -17,13 +17,20 @@ class PostgreSQLDatabase(DatabaseBase):
         初始化 PostgreSQL 连接
 
         参数:
-            database_url: 数据库连接 URL
+            database_url: 数据库连接 URL（可选，如果不提供则从config构建）
         """
-        config = get_config()
-        self.database_url = database_url or config.get(
-            'DATABASE_URL',
-            'postgresql://user:password@localhost:5432/interview_db'
-        )
+        if database_url:
+            self.database_url = database_url
+        else:
+            # 从配置构建连接URL
+            config = get_config()
+            host = config.get('POSTGRES_HOST', 'localhost')
+            port = config.get('POSTGRES_PORT', 5432)
+            db = config.get('POSTGRES_DB', 'tiny_rag')
+            user = config.get('POSTGRES_USER', 'rag_user')
+            password = config.get('POSTGRES_PASSWORD', 'rag_password')
+            self.database_url = f"postgresql://{user}:{password}@{host}:{port}/{db}"
+
         self.pool: Optional[asyncpg.Pool] = None
 
     async def connect(self) -> None:
@@ -85,6 +92,7 @@ class PostgreSQLDatabase(DatabaseBase):
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS episodic_memory (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    user_id UUID,  -- NULL表示系统知识库，非NULL表示用户面经
                     abstract_question TEXT NOT NULL,
                     original_question TEXT NOT NULL,
                     topic VARCHAR(200),
@@ -101,6 +109,25 @@ class PostgreSQLDatabase(DatabaseBase):
                 )
             """)
 
+            # Forum讨论表 存储多Agent讨论记录
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS forum_discussions (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    session_id VARCHAR(100) NOT NULL,
+                    user_id UUID,
+                    question TEXT NOT NULL,
+                    user_answer TEXT NOT NULL,
+                    rag_comment JSONB,
+                    web_comment JSONB,
+                    final_evaluation JSONB,
+                    discussion_history JSONB,
+                    total_rounds INTEGER DEFAULT 1,
+                    metadata JSONB,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+
             # 创建索引
             await conn.execute("""
                 CREATE INDEX IF NOT EXISTS idx_documents_user_id ON documents(user_id);
@@ -108,6 +135,8 @@ class PostgreSQLDatabase(DatabaseBase):
                 CREATE INDEX IF NOT EXISTS idx_semantic_memory_topic ON semantic_memory(topic);
                 CREATE INDEX IF NOT EXISTS idx_episodic_memory_topic ON episodic_memory(topic);
                 CREATE INDEX IF NOT EXISTS idx_episodic_memory_quality_score ON episodic_memory(quality_score);
+                CREATE INDEX IF NOT EXISTS idx_forum_discussions_user_id ON forum_discussions(user_id);
+                CREATE INDEX IF NOT EXISTS idx_forum_discussions_session_id ON forum_discussions(session_id);
             """)
 
             print("[OK] 数据库表已创建")
@@ -218,13 +247,14 @@ class PostgreSQLDatabase(DatabaseBase):
         async with self.pool.acquire() as conn:
             await conn.execute("""
                 INSERT INTO episodic_memory (
-                    id, abstract_question, original_question, topic,
+                    id, user_id, abstract_question, original_question, topic,
                     user_context, user_answer, evaluation, source,
                     company, difficulty, quality_score, metadata
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
             """,
                 memory_id,
+                memory.get('user_id'),  # NULL表示系统知识库
                 memory['abstract_question'],
                 memory['original_question'],
                 memory.get('topic'),
@@ -309,6 +339,92 @@ class PostgreSQLDatabase(DatabaseBase):
             else:
                 rows = await conn.fetch(
                     "SELECT * FROM documents WHERE user_id = $1 ORDER BY created_at DESC",
+                    user_id
+                )
+
+        return [dict(row) for row in rows]
+
+    async def insert_forum_discussion(self, discussion: Dict[str, Any]) -> str:
+        """
+        插入Forum讨论记录
+
+        参数:
+            discussion: 讨论记录，包含以下字段：
+                - session_id: 会话ID
+                - user_id: 用户ID
+                - question: 面试问题
+                - user_answer: 用户回答
+                - rag_comment: RAG评论（JSONB）
+                - web_comment: Web评论（JSONB）
+                - final_evaluation: 最终评价（JSONB）
+                - discussion_history: 讨论历史（JSONB）
+                - total_rounds: 讨论轮次
+                - metadata: 其他元数据（JSONB）
+
+        返回:
+            discussion_id: 插入记录的UUID
+        """
+        discussion_id = discussion.get('id') or str(uuid.uuid4())
+
+        async with self.pool.acquire() as conn:
+            await conn.execute("""
+                INSERT INTO forum_discussions (
+                    id, session_id, user_id, question, user_answer,
+                    rag_comment, web_comment, final_evaluation,
+                    discussion_history, total_rounds, metadata
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            """,
+                discussion_id,
+                discussion['session_id'],
+                discussion.get('user_id'),
+                discussion['question'],
+                discussion['user_answer'],
+                json.dumps(discussion.get('rag_comment')) if discussion.get('rag_comment') else None,
+                json.dumps(discussion.get('web_comment')) if discussion.get('web_comment') else None,
+                json.dumps(discussion.get('final_evaluation')) if discussion.get('final_evaluation') else None,
+                json.dumps(discussion.get('discussion_history')) if discussion.get('discussion_history') else None,
+                discussion.get('total_rounds', 1),
+                json.dumps(discussion.get('metadata')) if discussion.get('metadata') else None
+            )
+
+        return discussion_id
+
+    async def get_forum_discussion_by_id(self, discussion_id: str) -> Optional[Dict[str, Any]]:
+        """根据ID获取Forum讨论记录"""
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM forum_discussions WHERE id = $1", discussion_id
+            )
+
+        if row:
+            return dict(row)
+        return None
+
+    async def get_user_forum_discussions(
+        self,
+        user_id: str,
+        limit: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        查询用户的Forum讨论历史
+
+        参数:
+            user_id: 用户ID
+            limit: 限制返回数量
+
+        返回:
+            discussions: 讨论记录列表
+        """
+        async with self.pool.acquire() as conn:
+            if limit:
+                rows = await conn.fetch(
+                    "SELECT * FROM forum_discussions WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2",
+                    user_id, limit
+                )
+            else:
+                rows = await conn.fetch(
+                    "SELECT * FROM forum_discussions WHERE user_id = $1 ORDER BY created_at DESC",
                     user_id
                 )
 

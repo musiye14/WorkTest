@@ -45,6 +45,55 @@ class OpenAILLM(BaseLLM):
         )
         return response.choices[0].message.content
 
+    async def ainvoke(self, messages, **kwargs):
+        """
+        调用 LLM（异步）- 兼容 LangChain 接口
+
+        Args:
+            messages: LangChain 格式的消息列表（SystemMessage, HumanMessage等）
+            **kwargs: 其他参数
+
+        Returns:
+            包含 content 和 usage 属性的响应对象
+        """
+        # 将 LangChain 格式的 messages 转换为 OpenAI 格式
+        openai_messages = []
+        for msg in messages:
+            if hasattr(msg, 'type') and hasattr(msg, 'content'):
+                # LangChain Message 对象
+                role = 'system' if msg.type == 'system' else 'user' if msg.type == 'human' else 'assistant'
+                openai_messages.append({"role": role, "content": msg.content})
+            elif isinstance(msg, dict):
+                # 字典格式
+                openai_messages.append(msg)
+            else:
+                # 字符串格式
+                openai_messages.append({"role": "user", "content": str(msg)})
+
+        response = await self.async_client.chat.completions.create(
+            model=self.model_name,
+            messages=openai_messages,
+            temperature=kwargs.get("temperature", self.temperature),
+            **{k: v for k, v in kwargs.items() if k != "temperature"}
+        )
+
+        # 提取 token 使用量
+        usage = {}
+        if hasattr(response, 'usage') and response.usage:
+            usage = {
+                'prompt_tokens': response.usage.prompt_tokens,
+                'completion_tokens': response.usage.completion_tokens,
+                'total_tokens': response.usage.total_tokens
+            }
+
+        # 返回类似 LangChain 的响应对象，同时包含 usage 信息
+        class Response:
+            def __init__(self, content, usage):
+                self.content = content
+                self.usage = usage
+
+        return Response(response.choices[0].message.content, usage)
+
     def _invoke_with_schema(self, prompt: str, output_schema: Dict[str, Any], **kwargs) -> tuple[Dict[str, Any], Dict]:
         """调用 LLM 并返回结构化输出（同步）"""
         max_retries = 3

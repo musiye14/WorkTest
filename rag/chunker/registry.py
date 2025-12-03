@@ -44,7 +44,7 @@ class ChunkerRegistry:
                     )
 
                 cls._registry[ext_lower] = chunker_class
-                print(f"✓ 注册 {chunker_class.__name__} -> .{ext_lower}")
+                print(f"[OK] 注册 {chunker_class.__name__} -> .{ext_lower}")
 
             return chunker_class
 
